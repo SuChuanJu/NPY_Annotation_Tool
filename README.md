@@ -45,9 +45,9 @@ python main.py
 
 ##### 加载数据
 
-![image-20250809192228415](C:\Users\12162\AppData\Roaming\Typora\typora-user-images\image-20250809192228415.png)
+![image-20250809192228415](img\image-20250809192228415.png)
 
-![image-20250809192302481](C:\Users\12162\AppData\Roaming\Typora\typora-user-images\image-20250809192302481.png)
+![image-20250809192302481](img\image-20250809192302481.png)
 
 -   点击“选择文件夹”按钮，选择包含NPY文件的文件夹。
 -   工具会自动扫描并加载文件夹中的所有NPY文件。
@@ -55,7 +55,7 @@ python main.py
 
 ##### **分组与浏览**
 
-![image-20250809192947891](C:\Users\12162\AppData\Roaming\Typora\typora-user-images\image-20250809192947891.png)
+![image-20250809192947891](img\image-20250809192947891.png)
 
 -   加载完成后，文件会根据前缀/后缀名称进行分组，相同前缀/后缀为一组。
 -   可以通过“上一组”和“下一组”按钮在不同分组间切换。
@@ -63,22 +63,22 @@ python main.py
 -   窗口大小为一个窗口显示的点数，y轴模式是一个窗口是按照窗口最值分布还是整个文件的最值分布，窗口大小也可以在图标下方的+-符号进行改变，同时也可以前后拖动查看不同位置的数据
 -   遮罩id可以根据遮罩标记快速定位（有bug不要用）
 
-![image-20250809193055860](C:\Users\12162\AppData\Roaming\Typora\typora-user-images\image-20250809193055860.png)
+![image-20250809193055860](img\image-20250809193055860.png)
 
 ##### **数据标注**
 
-![image-20250809193301945](C:\Users\12162\AppData\Roaming\Typora\typora-user-images\image-20250809193301945.png)
+![image-20250809193301945](img\image-20250809193301945.png)
 
 -   在图表上按住鼠标左建立遮罩，再点击左键确认遮罩，再点击右键固定遮罩并将数据传入表格。
 
-![image-20250809193359900](C:\Users\12162\AppData\Roaming\Typora\typora-user-images\image-20250809193359900.png)
+![image-20250809193359900](img\image-20250809193359900.png)
 
 -   鼠标悬停在遮罩上可以拖动遮罩进行微调，同时遮罩会根据起始位置自动编号。
 -   可以点击表格中的“删除”按钮来移除不需要的标注。
 
 ##### **数据保存**
 
-![image-20250809193506034](C:\Users\12162\AppData\Roaming\Typora\typora-user-images\image-20250809193506034.png)
+![image-20250809193506034](img\image-20250809193506034.png)
 
 -   在“数据保存”区域，可以选择“合并保存”或“分别保存”模式，合并保存会把三个数组合并为一个二维数组。
 -   可以设置“跳过前N个点”来忽略数据开头的噪声点。
