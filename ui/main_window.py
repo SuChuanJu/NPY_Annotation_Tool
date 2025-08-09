@@ -79,6 +79,17 @@ class MainWindow(QMainWindow):
         self.sync_enabled = True
         self.master_plot = None  # 主控绘图组件
         
+        # 全局遮罩映射机制
+        self.global_mask_mapping = {}  # {global_mask_id: {plot_widget: local_mask_id}}
+        self.next_global_mask_id = 1
+        # 全局遮罩ID与标注引擎ID的映射
+        self.global_to_annotation_mapping = {}  # {global_mask_id: annotation_id}
+        
+        # 遮罩选中状态管理
+        self.selected_mask_id = None  # 当前选中的遮罩ID
+        self.mask_selection_enabled = True  # 选中模式开关
+        print("[DEBUG] 遮罩选中机制已初始化")
+        
         self.setup_ui()
         self.setup_connections()
         self.setup_status_bar()
@@ -648,6 +659,9 @@ class MainWindow(QMainWindow):
     
     def on_group_changed(self, group_index: int):
         """处理分组切换"""
+        # 切换组时清除遮罩选中状态
+        self.clear_mask_selection()
+        
         print(f"=== 组切换开始: 从组 {getattr(self, 'current_group_index', -1)} 切换到组 {group_index} ===")
         if 0 <= group_index < len(self.current_groups):
             # 保存当前组的标注状态
@@ -818,24 +832,36 @@ class MainWindow(QMainWindow):
     
     def on_prev_window(self):
         """处理上一窗口请求"""
+        # 点击按钮时清除遮罩选中状态
+        self.clear_mask_selection()
+        
         for plot_widget in self.plot_widgets:
             plot_widget.move_to_prev_window()
         self.update_slider_position()
     
     def on_next_window(self):
         """处理下一窗口请求"""
+        # 点击按钮时清除遮罩选中状态
+        self.clear_mask_selection()
+        
         for plot_widget in self.plot_widgets:
             plot_widget.move_to_next_window()
         self.update_slider_position()
     
     def on_zoom_in(self):
         """处理放大请求"""
+        # 点击按钮时清除遮罩选中状态
+        self.clear_mask_selection()
+        
         for plot_widget in self.plot_widgets:
             plot_widget.zoom_in()
         self.update_slider_range()
     
     def on_zoom_out(self):
         """处理缩小请求"""
+        # 点击按钮时清除遮罩选中状态
+        self.clear_mask_selection()
+        
         for plot_widget in self.plot_widgets:
             plot_widget.zoom_out()
         self.update_slider_range()
@@ -882,6 +908,9 @@ class MainWindow(QMainWindow):
     
     def on_mask_locate_clicked(self):
         """处理遮罩定位请求"""
+        # 点击定位按钮时清除遮罩选中状态
+        self.clear_mask_selection()
+        
         if not hasattr(self, 'mask_id_input') or not self.mask_id_input:
             return
         
@@ -949,11 +978,17 @@ class MainWindow(QMainWindow):
             # 添加标注
             annotation_id = self.annotation_engine.add_annotation(start, end)
             
-            # 更新显示
-            self.load_annotations()
+            # 同步遮罩到所有图表，并建立映射关系
+            global_mask_id = self.sync_annotation_to_all_plots(start, end)
             
-            # 同步遮罩到所有图表
-            self.sync_annotation_to_all_plots(start, end)
+            # 建立全局遮罩ID与标注引擎ID的映射
+            if global_mask_id is not None:
+                self.global_to_annotation_mapping[global_mask_id] = annotation_id
+                print(f"[DEBUG] 建立映射关系: 全局遮罩ID {global_mask_id} -> 标注ID {annotation_id}")
+            
+            # 更新控制面板显示（不重复添加遮罩到图表）
+            annotations = self.annotation_engine.get_annotations()
+            self.control_panel.update_annotations(annotations)
             
             self.show_status_message(f"添加标注 {annotation_id}: {start}-{end}")
             print(f"遮罩已同步到所有图表: {start} ~ {end}")
@@ -964,6 +999,20 @@ class MainWindow(QMainWindow):
     def on_annotation_deleted(self, annotation_id: int):
         """处理标注删除"""
         try:
+            # 查找并删除对应的映射关系
+            global_mask_id_to_remove = None
+            for g_id, a_id in self.global_to_annotation_mapping.items():
+                if a_id == annotation_id:
+                    global_mask_id_to_remove = g_id
+                    break
+            
+            if global_mask_id_to_remove is not None:
+                # 删除映射关系
+                del self.global_to_annotation_mapping[global_mask_id_to_remove]
+                if global_mask_id_to_remove in self.global_mask_mapping:
+                    del self.global_mask_mapping[global_mask_id_to_remove]
+                print(f"[DEBUG] 删除映射关系: 全局遮罩ID {global_mask_id_to_remove} -> 标注ID {annotation_id}")
+            
             self.annotation_engine.remove_annotation(annotation_id)
             self.load_annotations()
             # 清除所有图表上的遮罩
@@ -978,6 +1027,11 @@ class MainWindow(QMainWindow):
     def on_all_annotations_cleared(self):
         """处理清空全部标注"""
         try:
+            # 清空所有映射关系
+            self.global_mask_mapping.clear()
+            self.global_to_annotation_mapping.clear()
+            print("[DEBUG] 清空所有映射关系")
+            
             # 清空标注引擎中的所有标注
             self.annotation_engine.clear_annotations()
             # 清除所有图表上的遮罩
@@ -1014,32 +1068,203 @@ class MainWindow(QMainWindow):
         else:
             self.mouse_pos_label.setText(f"位置: {x:.1f}, 值: {y:.3f}")
     
+    def on_mask_selected(self, mask_id: str, source_plot_name: str):
+        """处理遮罩选中事件
+        
+        Args:
+            mask_id: 被选中的遮罩ID
+            source_plot_name: 发起选中的图表名称
+        """
+        try:
+            # 检查选中模式是否启用
+            if not self.mask_selection_enabled:
+                print(f"[DEBUG] 遮罩选中模式已禁用，忽略选中请求")
+                return
+            
+            # 查找对应的全局遮罩ID
+            global_mask_id = None
+            for g_id, mapping in self.global_mask_mapping.items():
+                for plot_widget, local_mask_id in mapping.items():
+                    if plot_widget.file_name == source_plot_name and local_mask_id == mask_id:
+                        global_mask_id = g_id
+                        break
+                if global_mask_id:
+                    break
+            
+            if global_mask_id is None:
+                print(f"[WARNING] 无法找到遮罩 {mask_id} 对应的全局ID")
+                return
+            
+            # 清除之前的选中状态
+            if self.selected_mask_id:
+                self.clear_mask_selection()
+            
+            # 设置新的选中状态
+            self.selected_mask_id = global_mask_id
+            
+            # 同步选中状态到所有图表
+            if global_mask_id in self.global_mask_mapping:
+                for plot_widget, local_mask_id in self.global_mask_mapping[global_mask_id].items():
+                    plot_widget.update_mask_visual_state(local_mask_id, selected=True)
+            
+            # 启用拖拽权限（只有选中的遮罩可以拖拽）
+            self.update_mask_drag_permissions(global_mask_id)
+            
+            print(f"[DEBUG] 遮罩选中: 全局ID {global_mask_id}, 本地ID {mask_id}, 来源图表: {source_plot_name}")
+            self.show_status_message(f"已选中遮罩 {global_mask_id}")
+            
+        except Exception as e:
+            print(f"处理遮罩选中时出错: {str(e)}")
+            self.show_error_message(f"遮罩选中失败: {str(e)}")
+    
+    def on_mask_hovered(self, mask_id: str, source_plot_name: str):
+        """处理遮罩悬停事件（实现悬停选中）
+        
+        Args:
+            mask_id: 悬停的遮罩ID
+            source_plot_name: 发起悬停的图表名称
+        """
+        # 悬停选中：如果没有选中遮罩或悬停到不同遮罩，则选中新遮罩
+        if not self.selected_mask_id or self.selected_mask_id != self.get_global_mask_id(mask_id, source_plot_name):
+            self.on_mask_selected(mask_id, source_plot_name)
+    
+    def get_global_mask_id(self, local_mask_id: str, source_plot_name: str) -> int:
+        """根据本地遮罩ID和来源图表名称获取全局遮罩ID
+        
+        Args:
+            local_mask_id: 本地遮罩ID
+            source_plot_name: 来源图表名称
+            
+        Returns:
+            全局遮罩ID，如果未找到返回None
+        """
+        for g_id, mapping in self.global_mask_mapping.items():
+            for plot_widget, local_id in mapping.items():
+                if plot_widget.file_name == source_plot_name and local_id == local_mask_id:
+                    return g_id
+        return None
+    
+    def clear_mask_selection(self):
+        """清除遮罩选中状态"""
+        if not self.selected_mask_id:
+            return
+        
+        try:
+            # 清除视觉选中状态
+            if self.selected_mask_id in self.global_mask_mapping:
+                for plot_widget, local_mask_id in self.global_mask_mapping[self.selected_mask_id].items():
+                    plot_widget.update_mask_visual_state(local_mask_id, selected=False)
+            
+            # 禁用所有遮罩的拖拽权限
+            self.disable_all_mask_dragging()
+            
+            print(f"[DEBUG] 清除遮罩选中状态: {self.selected_mask_id}")
+            self.selected_mask_id = None
+            
+        except Exception as e:
+            print(f"清除遮罩选中状态时出错: {str(e)}")
+    
+    def update_mask_drag_permissions(self, selected_global_mask_id: int):
+        """更新遮罩拖拽权限
+        
+        Args:
+            selected_global_mask_id: 被选中的全局遮罩ID
+        """
+        try:
+            # 禁用所有遮罩的拖拽
+            for global_id, mapping in self.global_mask_mapping.items():
+                for plot_widget, local_mask_id in mapping.items():
+                    # 查找遮罩项并设置拖拽权限
+                    for item in plot_widget.annotation_items:
+                        if item.get('id') == local_mask_id and item.get('type') == 'mask':
+                            region = item['region']
+                            # 只有选中的遮罩可以拖拽
+                            can_drag = (global_id == selected_global_mask_id)
+                            region.setMovable(can_drag)
+                            print(f"[DEBUG] 遮罩拖拽权限更新: 全局ID {global_id}, 本地ID {local_mask_id}, 可拖拽: {can_drag}")
+                            break
+            
+        except Exception as e:
+            print(f"更新遮罩拖拽权限时出错: {str(e)}")
+    
+    def disable_all_mask_dragging(self):
+        """禁用所有遮罩的拖拽功能"""
+        try:
+            for global_id, mapping in self.global_mask_mapping.items():
+                for plot_widget, local_mask_id in mapping.items():
+                    # 查找遮罩项并禁用拖拽
+                    for item in plot_widget.annotation_items:
+                        if item.get('id') == local_mask_id and item.get('type') == 'mask':
+                            region = item['region']
+                            region.setMovable(False)
+                            print(f"[DEBUG] 禁用遮罩拖拽: 全局ID {global_id}, 本地ID {local_mask_id}")
+                            break
+            
+        except Exception as e:
+            print(f"禁用遮罩拖拽时出错: {str(e)}")
+
     def on_mask_dragged(self, start: int, end: int):
         """处理遮罩拖拽事件"""
         try:
             # 获取发送信号的绘图组件
             sender_widget = self.sender()
             
-            # 更新标注引擎中的对应标注
-            annotations = self.annotation_engine.get_annotations()
-            if annotations:
-                # 找到需要更新的标注（这里简化处理，更新第一个标注）
-                # 在实际应用中，可能需要更精确的匹配逻辑
-                for annotation in annotations:
-                    # 更新标注的位置
-                    self.annotation_engine.update_annotation_position(annotation['id'], start, end)
+            # 获取被拖拽的遮罩ID
+            dragged_mask_id = getattr(sender_widget, '_last_dragged_mask_id', None)
+            print(f"[DEBUG] 拖拽的遮罩ID: {dragged_mask_id}")
+            
+            if not dragged_mask_id:
+                print("[WARNING] 无法获取被拖拽的遮罩ID")
+                return
+            
+            # 查找对应的全局遮罩ID
+            global_mask_id = None
+            for g_id, mapping in self.global_mask_mapping.items():
+                for plot_widget, local_mask_id in mapping.items():
+                    if plot_widget == sender_widget and local_mask_id == dragged_mask_id:
+                        global_mask_id = g_id
+                        break
+                if global_mask_id:
                     break
             
-            # 同步更新其他图表的遮罩位置
-            for plot_widget in self.plot_widgets:
-                if plot_widget != sender_widget:  # 不更新发送信号的图表
-                    # 清除现有遮罩
-                    plot_widget.clear_annotations()
-                    # 添加新位置的遮罩
-                    plot_widget.add_annotation_mask(start, end)
+            if global_mask_id is None:
+                print(f"[WARNING] 无法找到遮罩 {dragged_mask_id} 对应的全局ID")
+                return
             
-            # 更新控制面板中的标注列表显示
-            self.load_annotations()
+            # 检查拖拽权限：只有选中的遮罩才能拖拽
+            if self.selected_mask_id != global_mask_id:
+                print(f"[WARNING] 遮罩 {global_mask_id} 未被选中，但允许拖拽操作以保持同步")
+                # 注释掉return，允许拖拽操作继续进行
+                # return
+            
+            print(f"[DEBUG] 找到全局遮罩ID: {global_mask_id}")
+            
+            # 首先同步其他图表的遮罩位置（在更新标注引擎之前）
+            if global_mask_id in self.global_mask_mapping:
+                for plot_widget, local_mask_id in self.global_mask_mapping[global_mask_id].items():
+                    if plot_widget != sender_widget:  # 不更新发送信号的图表
+                        # 使用新的update_mask_by_id方法来更新遮罩位置（包括文本）
+                        success = plot_widget.update_mask_by_id(local_mask_id, start, end)
+                        if success:
+                            print(f"[DEBUG] 同步更新图表遮罩: 全局ID {global_mask_id}, 本地ID {local_mask_id} -> {start}-{end}")
+                        else:
+                            print(f"[WARNING] 更新图表遮罩失败: 全局ID {global_mask_id}, 本地ID {local_mask_id}")
+            
+            # 更新标注引擎中的对应标注
+            if global_mask_id in self.global_to_annotation_mapping:
+                annotation_id = self.global_to_annotation_mapping[global_mask_id]
+                success = self.annotation_engine.update_annotation_position(annotation_id, start, end)
+                if success:
+                    print(f"[DEBUG] 更新标注引擎: 标注ID {annotation_id} -> {start}-{end}")
+                    
+                    # 立即更新控制面板中的标注列表显示
+                    annotations = self.annotation_engine.get_annotations()
+                    self.control_panel.update_annotations(annotations)
+                    print(f"[DEBUG] 控制面板表格已更新")
+                else:
+                    print(f"[WARNING] 更新标注引擎失败: 标注ID {annotation_id}")
+            else:
+                print(f"[WARNING] 无法找到全局遮罩ID {global_mask_id} 对应的标注ID")
             
             # 更新状态栏
             self.show_status_message(f"遮罩已移动到: {start}-{end}")
@@ -1264,9 +1489,17 @@ class MainWindow(QMainWindow):
         """同步遮罩标注到所有图表"""
         if not self.plot_widgets:
             print("警告: 没有图表组件可以同步")
-            return
+            return None
         
         print(f"开始同步遮罩到 {len(self.plot_widgets)} 个图表")
+        
+        # 创建全局遮罩ID
+        global_mask_id = self.next_global_mask_id
+        self.next_global_mask_id += 1
+        self.global_mask_mapping[global_mask_id] = {}
+        
+        # 使用全局遮罩ID作为遮罩编号显示
+        mask_number = global_mask_id
         
         for i, widget in enumerate(self.plot_widgets):
             try:
@@ -1277,13 +1510,17 @@ class MainWindow(QMainWindow):
                 else:
                     print(f"图表 {i+1} ({widget.file_name}) 数据长度: {len(widget.data)}")
                 
-                # 为每个图表添加遮罩标注
-                widget.add_annotation_mask(start, end)
-                print(f"图表 {i+1} ({widget.file_name}) 遮罩同步成功")
+                # 为每个图表添加遮罩标注，传递遮罩编号
+                local_mask_id = widget.add_annotation_mask(start, end, mask_number)
+                # 建立全局映射
+                self.global_mask_mapping[global_mask_id][widget] = local_mask_id
+                print(f"图表 {i+1} ({widget.file_name}) 遮罩同步成功，全局ID: {global_mask_id}, 本地ID: {local_mask_id}, 编号: {mask_number}")
             except Exception as e:
                 print(f"图表 {i+1} ({widget.file_name}) 遮罩同步失败: {str(e)}")
                 import traceback
                 traceback.print_exc()
+        
+        return global_mask_id
     
     def clear_all_plot_annotations(self):
         """清除所有图表上的标注和遮罩"""
@@ -1317,14 +1554,30 @@ class MainWindow(QMainWindow):
         
         print(f"开始同步 {len(annotations)} 个标注到 {len(self.plot_widgets)} 个图表")
         
+        # 清空现有映射
+        self.global_mask_mapping.clear()
+        self.global_to_annotation_mapping.clear()
+        
         for annotation in annotations:
             start = annotation['start']
             end = annotation['end']
-            print(f"同步标注 {annotation['id']}: {start} - {end}")
+            annotation_id = annotation['id']
+            print(f"同步标注 {annotation_id}: {start} - {end}")
+            
+            # 创建全局遮罩ID
+            global_mask_id = self.next_global_mask_id
+            self.next_global_mask_id += 1
+            self.global_mask_mapping[global_mask_id] = {}
+            self.global_to_annotation_mapping[global_mask_id] = annotation_id
+            
+            # 使用全局遮罩ID作为遮罩编号显示
+            mask_number = global_mask_id
             
             for i, widget in enumerate(self.plot_widgets):
                 try:
-                    widget.add_annotation_mask(start, end)
+                    local_mask_id = widget.add_annotation_mask(start, end, mask_number)
+                    self.global_mask_mapping[global_mask_id][widget] = local_mask_id
+                    print(f"图表 {i+1} ({widget.file_name}) 同步标注成功: 全局ID {global_mask_id}, 本地ID {local_mask_id}, 编号: {mask_number}")
                 except Exception as e:
                     print(f"图表 {i+1} ({widget.file_name}) 同步标注失败: {str(e)}")
     

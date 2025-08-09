@@ -7,7 +7,7 @@
 import numpy as np
 from typing import List, Dict, Optional, Tuple
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QApplication
-from PyQt5.QtCore import Qt, pyqtSignal, QPointF
+from PyQt5.QtCore import Qt, pyqtSignal, QPointF, QTimer
 from PyQt5.QtGui import QFont, QPen, QBrush, QColor
 import pyqtgraph as pg
 
@@ -28,12 +28,12 @@ class CustomLinearRegionItem(pg.LinearRegionItem):
     def mousePressEvent(self, ev):
         """鼠标按下事件"""
         if ev.button() != Qt.LeftButton:
-            super().mousePressEvent(ev)
+            # 对于非左键事件，不处理，让事件传播到父级
+            ev.ignore()
             return
             
         # 获取鼠标在数据坐标系中的位置
-        pos = ev.pos()
-        scene_pos = self.mapToScene(pos)
+        scene_pos = self.mapToScene(ev.pos())
         view_pos = self.getViewBox().mapSceneToView(scene_pos)
         mouse_x = view_pos.x()
         
@@ -44,10 +44,16 @@ class CustomLinearRegionItem(pg.LinearRegionItem):
         modifiers = QApplication.keyboardModifiers()
         ctrl_pressed = modifiers & Qt.ControlModifier
         
+        # 检查当前是否有拖拽权限
+        if not self.movable:
+            # 如果没有拖拽权限，直接忽略事件
+            ev.ignore()
+            return
+            
         if ctrl_pressed:
             # Ctrl键按下：整体移动模式
             self._dragging_mode = 'whole'
-            self.setMovable(True)
+            # 保持当前的movable状态，不强制设置为True
             super().mousePressEvent(ev)
         else:
             # 默认模式：移动最近的边界
@@ -60,9 +66,6 @@ class CustomLinearRegionItem(pg.LinearRegionItem):
             else:
                 self._dragging_mode = 'right'
                 
-            # 禁用整体移动
-            self.setMovable(False)
-            
             # 记录拖拽开始信息
             self._drag_start_pos = mouse_x
             self._original_region = (start, end)
@@ -112,15 +115,15 @@ class CustomLinearRegionItem(pg.LinearRegionItem):
         elif self._dragging_mode in ['left', 'right']:
             ev.accept()
         else:
-            super().mouseReleaseEvent(ev)
+            # 对于非拖拽状态的事件，让事件传播
+            ev.ignore()
             
         # 重置拖拽状态
         self._dragging_mode = None
         self._drag_start_pos = None
         self._original_region = None
         
-        # 恢复可移动性（为下次拖拽做准备）
-        self.setMovable(True)
+        # 不强制设置movable状态，保持由权限管理系统控制
 
 
 class TimeSeriesPlotWidget(QWidget):
@@ -147,6 +150,12 @@ class TimeSeriesPlotWidget(QWidget):
         self.window_size = 1000
         self.window_start = 0
         self.y_mode = 'global'  # 'global' 或 'window'
+        
+        # 清除选中状态的计时器
+        self.clear_selection_timer = QTimer()
+        self.clear_selection_timer.setSingleShot(True)
+        self.clear_selection_timer.timeout.connect(self.on_clear_selection_timeout)
+        self.hover_in_blank_area = False
         
         self.setup_ui()
         self.setup_plot()
@@ -417,8 +426,10 @@ class TimeSeriesPlotWidget(QWidget):
     
     def on_mouse_clicked(self, event):
         """鼠标点击事件"""
+        print(f"[DEBUG] 鼠标点击事件: 按钮={event.button()}, 左键={Qt.LeftButton}, 右键={Qt.RightButton}")
         pos = event.scenePos()
         if not self.plot_item.sceneBoundingRect().contains(pos):
+            print("[DEBUG] 点击位置不在图表范围内")
             return
 
         mouse_point = self.plot_item.vb.mapSceneToView(pos)
@@ -426,6 +437,62 @@ class TimeSeriesPlotWidget(QWidget):
         x_pos = max(1, int(mouse_point.x()))
 
         if event.button() == Qt.LeftButton:
+            # 首先检查是否点击了遮罩（优先检查遮罩）
+            clicked_mask = None
+            for item in self.annotation_items:
+                if item.get('type') == 'mask':
+                    region = item['region']
+                    start, end = region.getRegion()
+                    # 优化点击检测：减小容差，提高精确性
+                    tolerance = max(2, (end - start) * 0.02)  # 减小容差到2个单位
+                    if (start - tolerance) <= x_pos <= (end + tolerance):
+                        clicked_mask = item
+                        print(f"[DEBUG] 点击了遮罩: {item['id']}, 范围: {start}-{end}, 点击位置: {x_pos}")
+                        break
+            
+            if clicked_mask:
+                # 选中遮罩，阻止创建新标注
+                self.select_mask(clicked_mask['id'])
+                return  # 重要：直接返回，不继续处理
+            
+            # 检查是否有遮罩被选中，如果有则不允许创建新标注
+            widget = self
+            main_window = None
+            while widget:
+                if hasattr(widget, 'selected_mask_id'):
+                    main_window = widget
+                    break
+                widget = widget.parent()
+            
+            if main_window and getattr(main_window, 'selected_mask_id', None):
+                # 如果有遮罩被选中，点击空白区域不再立即清除选中状态
+                # 清除选中状态现在通过悬停1秒或点击按钮触发
+                pass
+            
+            # 检查是否点击在现有标注上
+            clicked_annotation = None
+            for item in self.annotation_items:
+                if item.get('type') != 'mask':  # 只检查非遮罩标注
+                    region = item['region']
+                    start, end = region.getRegion()
+                    tolerance = max(5, (end - start) * 0.05)  # 至少5个单位的容差
+                    if (start - tolerance) <= x_pos <= (end + tolerance):
+                        clicked_annotation = item
+                        print(f"[DEBUG] 点击了标注: {item['id']}, 范围: {start}-{end}, 点击位置: {x_pos}")
+                        break
+            
+            if clicked_annotation:
+                # 选中标注
+                self.select_annotation(clicked_annotation['id'])
+                return  # 直接返回，不创建新标注
+            
+            # 没有点击在任何标注上，开始新的标注
+            if hasattr(self, 'main_window') and self.main_window:
+                # 清除之前的选择
+                self.main_window.clear_mask_selection()
+                self.clear_annotation_selection()
+            
+            # 继续原有的标注逻辑
             if not self.is_annotating:
                 # 开始标注
                 self.is_annotating = True
@@ -460,6 +527,10 @@ class TimeSeriesPlotWidget(QWidget):
                 self.plot_item.removeItem(self.temp_annotation_item)
                 self.temp_annotation_item = None
                 self.annotation_start_x = None
+            else:
+                # 检查是否有待同步的遮罩
+                print("[DEBUG] 右键点击 - 开始检查待同步遮罩")
+                self.sync_pending_masks()
     
     def on_mouse_moved(self, pos):
         """鼠标移动事件"""
@@ -470,15 +541,27 @@ class TimeSeriesPlotWidget(QWidget):
             # 发送鼠标位置信号
             self.mouse_moved.emit(x, y)
             
+            # 检查是否悬停在遮罩上，实现悬停选中
+            hover_on_mask = self.check_mask_hover(x)
+            
+            # 检查是否在空白区域悬停
+            self.check_blank_area_hover(x, hover_on_mask)
+            
             # 检查是否靠近遮罩边缘并更新光标
             self.check_cursor_near_mask_edge(x)
             
             # 更新临时标注
             if self.is_annotating:
-                x_pos = max(1, int(x))  # 确保坐标不小于1且类型一致
-                start_x = min(self.annotation_start_x, x_pos)
-                end_x = max(self.annotation_start_x, x_pos)
-                self.update_temp_annotation(start_x, end_x)
+                current_x = max(1, int(x))  # 确保坐标不小于1且类型一致
+                annotation_start = min(self.annotation_start_x, current_x)
+                annotation_end = max(self.annotation_start_x, current_x)
+                self.update_temp_annotation(annotation_start, annotation_end)
+    
+    def contextMenuEvent(self, event):
+        """右键菜单事件，扩展触发范围到整个widget"""
+        print("[DEBUG] 右键菜单事件 - 检查待同步遮罩")
+        self.sync_pending_masks()
+        event.accept()
     
     def wheelEvent(self, event):
         """滚轮事件，用于缩放"""
@@ -682,12 +765,13 @@ class TimeSeriesPlotWidget(QWidget):
         if self.y_mode == 'global':
             self.plot_item.setYRange(*y_range, padding=0)
     
-    def add_annotation_mask(self, start: int, end: int):
+    def add_annotation_mask(self, start: int, end: int, mask_number: int = None):
         """添加永久遮罩标注
         
         Args:
             start: 起始位置
             end: 结束位置
+            mask_number: 遮罩编号（用于显示）
         """
         if self.data is None:
             print(f"警告: 图表 {self.file_name} 没有数据，无法添加遮罩")
@@ -699,7 +783,7 @@ class TimeSeriesPlotWidget(QWidget):
             orientation='vertical',
             brush=pg.mkBrush(255, 0, 0, 100),  # 增加透明度到100
             pen=pg.mkPen(255, 0, 0, 200),      # 增加边框透明度
-            movable=True  # 启用拖拽功能
+            movable=False  # 默认禁用拖拽功能，需要选中后才能拖拽
         )
         
         # 连接拖拽事件信号
@@ -708,7 +792,27 @@ class TimeSeriesPlotWidget(QWidget):
         )
         
         self.plot_item.addItem(annotation_item)
-        print(f"图表 {self.file_name} 添加永久遮罩: {start} ~ {end}，当前视图范围: {self.plot_item.viewRange()}")
+        
+        # 创建遮罩编号文本（如果提供了编号）
+        text_item = None
+        if mask_number is not None:
+            center_x = (start + end) / 2
+            if self.data is not None:
+                y_min, y_max = self.plot_item.viewRange()[1]
+                center_y = (y_min + y_max) / 2
+            else:
+                center_y = 0
+            
+            text_item = pg.TextItem(
+                text=str(mask_number),
+                color=(255, 255, 255),  # 白色文字更清晰
+                anchor=(0.5, 0.5)
+            )
+            text_item.setFont(QFont("Arial", 14, QFont.Bold))
+            text_item.setPos(center_x, center_y)
+            self.plot_item.addItem(text_item)
+        
+        print(f"图表 {self.file_name} 添加永久遮罩: {start} ~ {end}，编号: {mask_number}")
         
         # 更新X轴刻度设置，确保标签不重叠
         print(f"[DEBUG] add_annotation_mask 调用 _update_x_axis_ticks - 图表: {getattr(self, 'file_name', 'Unknown')}")
@@ -723,16 +827,22 @@ class TimeSeriesPlotWidget(QWidget):
         if not hasattr(self, 'annotation_items'):
             self.annotation_items = []
         
-        # 为遮罩创建一个简化的字典格式，以保持一致性
+        # 为遮罩创建一个带唯一ID的字典格式
+        import uuid
         mask_item = {
-            'id': f'mask_{len(self.annotation_items)}',
+            'id': str(uuid.uuid4()),  # 使用UUID确保全局唯一性
+            'type': 'mask',
             'region': annotation_item,
-            'text': None,  # 遮罩没有文本
+            'text': text_item,  # 保存文本引用
             'start': start,
             'end': end,
-            'is_mask': True
+            'original_start': start,  # 记录原始位置用于匹配
+            'original_end': end,      # 记录原始位置用于匹配
+            'type': 'mask',
+            'mask_number': mask_number  # 保存遮罩编号
         }
         self.annotation_items.append(mask_item)
+        return mask_item['id']  # 返回遮罩ID供外部使用
     
     def check_cursor_near_mask_edge(self, x_pos: float):
         """检查鼠标是否靠近遮罩边缘，并更新光标样式
@@ -749,7 +859,7 @@ class TimeSeriesPlotWidget(QWidget):
         # 检查所有遮罩项
         if hasattr(self, 'annotation_items'):
             for item in self.annotation_items:
-                if item.get('is_mask', False):
+                if item.get('type') == 'mask':
                     region = item['region']
                     start, end = region.getRegion()
                     
@@ -766,34 +876,192 @@ class TimeSeriesPlotWidget(QWidget):
             self.plot_widget.setCursor(Qt.ArrowCursor)
     
     def on_mask_dragged(self, region_item):
-        """处理遮罩拖拽事件
+        """处理遮罩拖拽事件（仅更新本地显示，不触发同步）
         
         Args:
             region_item: 被拖拽的LinearRegionItem
         """
         try:
+            # 检查拖拽权限
+            if not region_item.movable:
+                print(f"[DEBUG] 遮罩不可拖拽，忽略拖拽事件")
+                return
+            
             # 获取新的遮罩范围
             start, end = region_item.getRegion()
             start, end = int(start), int(end)
+            
+            # 强制边界保护
+            start = max(1, start)  # 确保不小于1
+            end = max(start + 1, end)  # 确保end > start
+            if self.data is not None:
+                end = min(end, len(self.data) - 1)  # 确保不超出数据范围
             
             # 确保范围有效
             if start >= end:
                 return
             
-            # 找到对应的遮罩项并更新
+            # 找到对应的遮罩项并更新，同时获取遮罩ID
+            mask_id = None
             for item in self.annotation_items:
-                if item.get('is_mask', False) and item['region'] == region_item:
+                if item.get('type') == 'mask' and item['region'] == region_item:
                     item['start'] = start
                     item['end'] = end
+                    mask_id = item['id']
+                    
+                    # 更新文本位置（如果有文本）
+                    if item['text'] is not None:
+                        center_x = (start + end) / 2
+                        if self.data is not None:
+                            y_min, y_max = self.plot_item.viewRange()[1]
+                            center_y = (y_min + y_max) / 2
+                        else:
+                            center_y = 0
+                        item['text'].setPos(center_x, center_y)
+                        print(f"[DEBUG] 更新遮罩{mask_id}文本位置到: ({center_x}, {center_y})")
+                    
+                    # 遮罩已修改，保持正常颜色（因为立即同步）
+                    print(f"[DEBUG] 遮罩{mask_id}已修改: {start}-{end}")
+                    
                     break
             
-            # 发送遮罩拖拽信号，通知主窗口同步其他图表和表格
+            # 存储当前拖拽的遮罩ID并立即触发同步
+            if mask_id:
+                self._last_dragged_mask_id = mask_id
+                print(f"[DEBUG] 遮罩{mask_id}拖拽到新位置: {start} ~ {end}，立即同步")
+                
+                # 立即发送同步信号到主窗口
+                self.mask_dragged.emit(start, end)
+            else:
+                print(f"[WARNING] 未找到对应的遮罩项")
+        
+        except Exception as e:
+            print(f"[ERROR] 处理遮罩拖拽时出错: {e}")
+
+    def auto_sync_mask(self, mask_id: str, start: int, end: int):
+        """自动同步单个遮罩"""
+        try:
+            print(f"[DEBUG] 自动同步遮罩{mask_id}: {start}-{end}")
+            
+            # 发送同步信号
+            self._last_dragged_mask_id = mask_id
             self.mask_dragged.emit(start, end)
             
-            print(f"遮罩拖拽到新位置: {start} ~ {end}")
+            # 清除待同步状态并恢复正常颜色
+            for item in self.annotation_items:
+                if item.get('id') == mask_id and item.get('type') == 'mask':
+                    item['pending_sync'] = False
+                    
+                    # 恢复遮罩的原始颜色
+                    region = item['region']
+                    region.setBrush(pg.mkBrush(255, 0, 0, 80))  # 恢复红色
+                    region.setPen(pg.mkPen(255, 0, 0, 150))  # 恢复红色边框
+                    
+                    print(f"[DEBUG] 遮罩{mask_id}自动同步完成")
+                    break
+            
+            # 显示同步完成提示
+            widget = self
+            main_window = None
+            while widget:
+                if hasattr(widget, 'show_status_message'):
+                    main_window = widget
+                    break
+                widget = widget.parent()
+            
+            if main_window:
+                main_window.show_status_message(f"遮罩{mask_id}已自动同步")
+                
+        except Exception as e:
+            print(f"[ERROR] 自动同步遮罩{mask_id}时出错: {e}")
+    
+    def get_mask_sync_status(self):
+        """获取遮罩同步状态摘要"""
+        if not hasattr(self, 'annotation_items'):
+            return {'total': 0, 'pending': 0, 'synced': 0}
+            
+        total_masks = len([item for item in self.annotation_items if item.get('type') == 'mask'])
+        pending_masks = len([item for item in self.annotation_items if item.get('type') == 'mask' and item.get('pending_sync', False)])
+        
+        return {
+            'total': total_masks,
+            'pending': pending_masks,
+            'synced': total_masks - pending_masks
+        }
+
+    def sync_pending_masks(self):
+        """手动同步所有待同步的遮罩（右键触发）"""
+        try:
+            # 添加详细调试信息
+            print(f"[DEBUG] 检查 {len(self.annotation_items)} 个标注项")
+            
+            pending_masks = []
+            for i, item in enumerate(self.annotation_items):
+                item_type = item.get('type')
+                pending_sync = item.get('pending_sync', False)
+                item_id = item.get('id')
+                print(f"[DEBUG] 项目 {i}: type={item_type}, pending_sync={pending_sync}, id={item_id}")
+                
+                if item_type == 'mask' and pending_sync:
+                    pending_masks.append(item)
+            
+            # 获取同步状态摘要
+            sync_status = self.get_mask_sync_status()
+            print(f"[DEBUG] 同步状态: 总计{sync_status['total']}个遮罩, 待同步{sync_status['pending']}个, 已同步{sync_status['synced']}个")
+            
+            if not pending_masks:
+                print("[DEBUG] 没有待同步的遮罩")
+                # 显示提示信息
+                widget = self
+                main_window = None
+                while widget:
+                    if hasattr(widget, 'show_status_message'):
+                        main_window = widget
+                        break
+                    widget = widget.parent()
+                
+                if main_window:
+                    main_window.show_status_message(f"没有待同步的遮罩 (总计{sync_status['total']}个遮罩)")
+                return
+            
+            print(f"[DEBUG] 发现{len(pending_masks)}个待同步的遮罩")
+            
+            # 同步每个待同步的遮罩
+            for item in pending_masks:
+                mask_id = item['id']
+                start = item['start']
+                end = item['end']
+                
+                # 发送同步信号
+                self._last_dragged_mask_id = mask_id
+                self.mask_dragged.emit(start, end)
+                
+                # 清除待同步标记并恢复原始颜色
+                item['pending_sync'] = False
+                
+                # 恢复遮罩的原始颜色
+                region = item['region']
+                region.setBrush(pg.mkBrush(255, 0, 0, 80))  # 恢复红色
+                region.setPen(pg.mkPen(255, 0, 0, 150))  # 恢复红色边框
+                
+                print(f"[DEBUG] 已同步遮罩{mask_id}: {start}-{end}")
+            
+            print(f"[DEBUG] 所有待同步遮罩已完成同步")
+            
+            # 显示同步完成提示
+            widget = self
+            main_window = None
+            while widget:
+                if hasattr(widget, 'show_status_message'):
+                    main_window = widget
+                    break
+                widget = widget.parent()
+            
+            if main_window:
+                main_window.show_status_message(f"已同步{len(pending_masks)}个遮罩")
             
         except Exception as e:
-            print(f"处理遮罩拖拽时出错: {e}")
+            print(f"同步遮罩时出错: {str(e)}")
     
     def get_view_range(self) -> Tuple[Tuple[float, float], Tuple[float, float]]:
         """获取当前视图范围
@@ -893,6 +1161,304 @@ class TimeSeriesPlotWidget(QWidget):
             # 计算居中位置
             center_start = max(0, (data_length - self.window_size) // 2)
             self.window_start = center_start
+    
+    def find_mask_by_region(self, region_item) -> Optional[str]:
+        """根据PyQtGraph区域组件查找遮罩ID
+        
+        Args:
+            region_item: PyQtGraph的LinearRegionItem对象
+        
+        Returns:
+            Optional[str]: 遮罩ID，如果未找到则返回None
+        """
+        for item in self.annotation_items:
+            if item.get('type') == 'mask' and item.get('region') == region_item:
+                return item.get('id')
+        return None
         
         self.update_plot()
         print(f"数据已居中: 起始位置 {self.window_start}, 窗口大小 {self.window_size}")
+    
+    def check_mask_click(self, x_pos: float) -> Optional[str]:
+        """检查鼠标点击位置是否在遮罩内
+        
+        Args:
+            x_pos: 鼠标X坐标位置
+        
+        Returns:
+            Optional[str]: 被点击的遮罩ID，如果没有点击遮罩则返回None
+        """
+        if not hasattr(self, 'annotation_items'):
+            print(f"[DEBUG] 没有annotation_items属性")
+            return None
+        
+        print(f"[DEBUG] 检查点击位置 {x_pos}，遮罩数量: {len([item for item in self.annotation_items if item.get('type') == 'mask'])}")
+        
+        # 遍历所有遮罩项，检查点击位置
+        for item in self.annotation_items:
+            if item.get('type') == 'mask':
+                region = item['region']
+                start, end = region.getRegion()
+                print(f"[DEBUG] 检查遮罩 {item['id']}: 范围 {start}-{end}")
+                
+                # 检查点击位置是否在遮罩范围内
+                if start <= x_pos <= end:
+                    print(f"[DEBUG] 点击命中遮罩 {item['id']}")
+                    return item['id']
+        
+        print(f"[DEBUG] 点击位置 {x_pos} 没有命中任何遮罩")
+        return None
+    
+    def select_mask(self, mask_id: str):
+        """选中指定的遮罩
+        
+        Args:
+            mask_id: 要选中的遮罩ID
+        """
+        # 通知主窗口遮罩被选中
+        # 需要向上查找到MainWindow实例
+        widget = self
+        main_window = None
+        while widget:
+            if hasattr(widget, 'on_mask_selected'):
+                main_window = widget
+                break
+            widget = widget.parent()
+        
+        if main_window:
+            main_window.on_mask_selected(mask_id, self.file_name)
+            print(f"[DEBUG] 通知主窗口遮罩{mask_id}被选中 - 图表: {self.file_name}")
+        else:
+            print(f"[WARNING] 无法找到主窗口实例，无法通知遮罩选中事件")
+        
+        # 更新遮罩视觉状态（可选：添加选中效果）
+        self.update_mask_visual_state(mask_id, selected=True)
+    
+    def update_mask_visual_state(self, mask_id: str, selected: bool):
+        """更新遮罩的视觉状态
+        
+        Args:
+            mask_id: 遮罩ID
+            selected: 是否选中
+        """
+        if not hasattr(self, 'annotation_items'):
+            return
+        
+        # 找到指定的遮罩
+        for item in self.annotation_items:
+            if item.get('id') == mask_id and item.get('type') == 'mask':
+                region = item['region']
+                
+                try:
+                    if selected:
+                        # 选中状态：更亮的颜色和更粗的边框
+                        selected_brush = pg.mkBrush(255, 120, 120, 180)  # 更亮的红色
+                        selected_pen = pg.mkPen(255, 255, 0, 255, width=4)  # 黄色边框更明显
+                        region.setBrush(selected_brush)
+                        
+                        # 尝试多种方式设置边框
+                        if hasattr(region, 'setPen'):
+                            region.setPen(selected_pen)
+                        else:
+                            region.pen = selected_pen
+                        
+                        print(f"[DEBUG] 遮罩{mask_id}设置为选中状态 - 图表: {getattr(self, 'file_name', 'Unknown')}")
+                    else:
+                        # 未选中状态：恢复默认颜色
+                        default_brush = pg.mkBrush(255, 0, 0, 100)  # 默认红色
+                        default_pen = pg.mkPen(255, 0, 0, 200, width=1)  # 默认边框
+                        region.setBrush(default_brush)
+                        
+                        # 尝试多种方式设置边框
+                        if hasattr(region, 'setPen'):
+                            region.setPen(default_pen)
+                        else:
+                            region.pen = default_pen
+                        
+                        print(f"[DEBUG] 遮罩{mask_id}设置为未选中状态 - 图表: {getattr(self, 'file_name', 'Unknown')}")
+                    
+                    # 强制更新显示
+                    region.update()
+                    # 同时更新整个绘图区域
+                    self.plot_item.update()
+                    self.update()
+                    
+                except Exception as e:
+                    print(f"[WARNING] 更新遮罩视觉状态时出错: {e}")
+                    # 如果设置失败，至少更新brush
+                    try:
+                        if selected:
+                            region.setBrush(pg.mkBrush(255, 120, 120, 180))
+                        else:
+                            region.setBrush(pg.mkBrush(255, 0, 0, 100))
+                        region.update()
+                    except:
+                        pass
+                
+                break
+    
+    def clear_all_mask_selection(self):
+        """清除所有遮罩的选中状态"""
+        if not hasattr(self, 'annotation_items'):
+            return
+        
+        for item in self.annotation_items:
+            if item.get('type') == 'mask':
+                self.update_mask_visual_state(item['id'], selected=False)
+        
+        print(f"[DEBUG] 清除图表{self.file_name}所有遮罩选中状态")
+    
+    def check_mask_hover(self, x_pos: float) -> bool:
+        """检查鼠标悬停位置是否在遮罩内，实现悬停选中
+        
+        Args:
+            x_pos: 鼠标X坐标位置
+            
+        Returns:
+            bool: 是否悬停在遮罩上
+        """
+        if not hasattr(self, 'annotation_items'):
+            return False
+        
+        # 检查是否悬停在任何遮罩上
+        hovered_mask_id = None
+        for item in self.annotation_items:
+            if item.get('type') == 'mask':
+                region = item['region']
+                start, end = region.getRegion()
+                
+                # 检查悬停位置是否在遮罩范围内
+                if start <= x_pos <= end:
+                    hovered_mask_id = item['id']
+                    break
+        
+        # 防止重复处理同一个状态
+        if hasattr(self, '_last_hovered_mask') and self._last_hovered_mask == hovered_mask_id:
+            return hovered_mask_id is not None
+        
+        self._last_hovered_mask = hovered_mask_id
+        
+        # 获取主窗口实例
+        widget = self
+        main_window = None
+        while widget:
+            if hasattr(widget, 'on_mask_hovered') or hasattr(widget, 'clear_mask_selection'):
+                main_window = widget
+                break
+            widget = widget.parent()
+        
+        if not main_window:
+            return hovered_mask_id is not None
+        
+        if hovered_mask_id:
+            # 悬停到遮罩时选中所有相同编号的遮罩
+            if hasattr(main_window, 'on_mask_hovered'):
+                main_window.on_mask_hovered(hovered_mask_id, self.file_name)
+            elif hasattr(main_window, 'on_mask_selected'):
+                main_window.on_mask_selected(hovered_mask_id, self.file_name)
+            print(f"[DEBUG] 悬停选中遮罩: {hovered_mask_id}，所有相同编号遮罩已联动选中")
+        # 注意：移除了鼠标移开时自动取消选中的逻辑
+        # 现在只有点击空白区域或其他遮罩时才会切换选中状态
+        
+        return hovered_mask_id is not None
+    
+    def check_blank_area_hover(self, x_pos: float, hover_on_mask: bool):
+        """检查是否在空白区域悬停，启动清除选中状态的计时器
+        
+        Args:
+            x_pos: 鼠标X坐标位置
+            hover_on_mask: 是否悬停在遮罩上
+        """
+        if hover_on_mask:
+            # 如果悬停在遮罩上，停止计时器
+            self.clear_selection_timer.stop()
+            self.hover_in_blank_area = False
+        else:
+            # 如果在空白区域且有遮罩被选中，启动计时器
+            if not self.hover_in_blank_area:
+                # 检查是否有遮罩被选中
+                widget = self
+                main_window = None
+                while widget:
+                    if hasattr(widget, 'selected_mask_id'):
+                        main_window = widget
+                        break
+                    widget = widget.parent()
+                
+                if main_window and hasattr(main_window, 'selected_mask_id') and main_window.selected_mask_id:
+                    print(f"[DEBUG] 在空白区域悬停，1秒后将清除遮罩选中状态")
+                    self.clear_selection_timer.start(1000)  # 1秒后触发
+                    self.hover_in_blank_area = True
+    
+    def on_clear_selection_timeout(self):
+        """计时器超时回调，清除遮罩选中状态"""
+        print(f"[DEBUG] 在空白区域停留1秒，清除遮罩选中状态")
+        
+        # 获取主窗口实例
+        widget = self
+        main_window = None
+        while widget:
+            if hasattr(widget, 'clear_mask_selection'):
+                main_window = widget
+                break
+            widget = widget.parent()
+        
+        if main_window and hasattr(main_window, 'clear_mask_selection'):
+            main_window.clear_mask_selection()
+        
+        self.hover_in_blank_area = False
+    
+    def update_mask_by_id(self, mask_id: str, start: int, end: int) -> bool:
+        """根据遮罩ID更新遮罩位置
+        
+        Args:
+            mask_id: 遮罩ID
+            start: 新的起始位置
+            end: 新的结束位置
+        
+        Returns:
+            bool: 更新是否成功
+        """
+        if not hasattr(self, 'annotation_items'):
+            return False
+        
+        for item in self.annotation_items:
+            if item.get('id') == mask_id and item.get('type') == 'mask':
+                try:
+                    # 更新区域位置
+                    region = item['region']
+                    
+                    # 使用blockSignals避免信号连接竞争
+                    region.blockSignals(True)
+                    region.setRegion([start, end])
+                    region.blockSignals(False)
+                    
+                    # 更新存储的位置信息
+                    item['start'] = start
+                    item['end'] = end
+                    
+                    # 更新文本位置（如果有文本）
+                    if item['text'] is not None:
+                        center_x = (start + end) / 2
+                        if self.data is not None:
+                            y_min, y_max = self.plot_item.viewRange()[1]
+                            center_y = (y_min + y_max) / 2
+                        else:
+                            center_y = 0
+                        item['text'].setPos(center_x, center_y)
+                        print(f"[DEBUG] 同步更新遮罩{mask_id}文本位置到: ({center_x}, {center_y})")
+                    
+                    # 强制更新显示
+                    region.update()
+                    self.plot_item.update()
+                    self.update()
+                    
+                    print(f"[DEBUG] 成功更新遮罩{mask_id}位置: {start}-{end}")
+                    return True
+                    
+                except Exception as e:
+                    print(f"[ERROR] 更新遮罩{mask_id}位置时出错: {e}")
+                    return False
+        
+        print(f"[WARNING] 未找到遮罩{mask_id}")
+        return False

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<memory>
+  <item id="mem_1754710300230_8jqccjaxj" time="2025/08/09 11:31">
+    <content>
+      NPY时间序列标注工具遮罩拖拽问题修复方案：
+    
+      问题描述：调节第二个遮罩时，第一个遮罩会消失并移动到第二个遮罩位置，调节对象也变成第一个遮罩。
+    
+      根本原因：main_window.py中on_mask_dragged方法在同步其他图表遮罩时，总是更新第一个遮罩而非根据ID精确匹配。
+    
+      修复方案：
+      1. 在MainWindow.__init__中添加全局遮罩映射机制：self.global_mask_mapping和self.next_global_mask_id
+      2. 修改sync_annotation_to_all_plots方法，为每个遮罩创建全局ID并建立映射关系
+      3. 重构on_mask_dragged方法，使用全局映射来精确识别和同步遮罩
+      4. 在plot_widget.py的add_annotation_mask方法中添加original_start和original_end字段
+    
+      修复效果：现在每个遮罩都有唯一的全局ID，拖拽时能够精确识别和同步对应的遮罩，解决了遮罩错位和混淆问题。
+    </content>
+    <tags>#工具使用</tags>
+  </item>
+  <item id="mem_1754710767592_m6rpco82d" time="2025/08/09 11:39">
+    <content>
+      NPY时间序列标注工具遮罩拖拽问题的完整修复方案：
+    
+      问题根因：
+      1. on_mask_dragged方法在更新标注引擎时总是更新第一个标注，而不是根据遮罩ID精确匹配
+      2. 缺乏全局遮罩ID与标注引擎ID之间的映射关系
+      3. 多个遮罩拖拽时会相互干扰，导致遮罩错位和调节对象混乱
+    
+      完整修复方案：
+      1. 添加全局遮罩ID与标注引擎ID的映射机制：self.global_to_annotation_mapping
+      2. 修改on_range_confirmed方法，在添加标注时建立映射关系
+      3. 更新sync_annotation_to_all_plots方法，返回全局遮罩ID并建立映射
+      4. 重构on_mask_dragged方法，使用映射关系精确更新对应的标注
+      5. 更新sync_all_annotations_to_plots方法，重新同步时重建映射关系
+      6. 修改on_annotation_deleted和on_all_annotations_cleared方法，删除时清理映射关系
+    
+      修复效果：
+      - 每个遮罩都有唯一的全局ID和对应的标注引擎ID
+      - 拖拽遮罩时能够精确识别并更新对应的标注
+      - 解决了多遮罩拖拽时的错位和混乱问题
+      - 保持了调节对象的正确性，不再发生错误切换
+    </content>
+    <tags>#工具使用</tags>
+  </item>
+</memory>
