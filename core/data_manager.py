@@ -27,6 +27,8 @@ class DataManager(QObject):
         self.original_shapes = []  # 原始数据形状
         self.skip_file_check = False  # 跳过文件存在检查的标志
         self.common_prefix = ""  # 文件的公共前缀
+        self.use_memory_mapping = False  # 是否使用内存映射加载数据
+        self.mapped_arrays = []  # 存储内存映射数组的引用
         
     def set_skip_points(self, skip_points: int):
         """设置跳过的点数
@@ -35,6 +37,14 @@ class DataManager(QObject):
             skip_points: 要跳过的前N个数据点
         """
         self.skip_points = max(0, skip_points)
+    
+    def set_memory_mapping(self, use_memory_mapping: bool):
+        """设置是否使用内存映射加载数据
+        
+        Args:
+            use_memory_mapping: 是否使用内存映射
+        """
+        self.use_memory_mapping = use_memory_mapping
     
     def _calculate_common_prefix(self, file_paths: List[str]) -> str:
         """计算文件路径的公共前缀
@@ -136,6 +146,7 @@ class DataManager(QObject):
         self.data_arrays = []
         self.file_paths = []
         self.original_shapes = []
+        self.mapped_arrays = []  # 清空之前的内存映射引用
         
         if not file_paths:
             self.error_occurred.emit("没有选择文件")
@@ -149,8 +160,12 @@ class DataManager(QObject):
                 # 发送加载进度
                 self.loading_progress.emit(i + 1, total_files)
                 
-                # 加载NPY文件
-                data = np.load(file_path)
+                # 加载NPY文件，根据设置决定是否使用内存映射
+                if self.use_memory_mapping:
+                    data = np.load(file_path, mmap_mode='r')  # 使用只读内存映射
+                    self.mapped_arrays.append(data)  # 保存引用以防止被垃圾回收
+                else:
+                    data = np.load(file_path)
                 
                 # 记录原始形状并打印调试信息
                 self.original_shapes.append(data.shape)

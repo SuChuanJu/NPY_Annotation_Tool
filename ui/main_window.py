@@ -6,6 +6,7 @@
 
 import os
 import sys
+import weakref
 from typing import List, Dict, Optional
 import numpy as np
 from PyQt5.QtWidgets import (
@@ -13,7 +14,7 @@ from PyQt5.QtWidgets import (
     QStatusBar, QMenuBar, QAction, QMessageBox, QProgressBar,
     QLabel, QApplication, QPushButton, QScrollArea
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QThreadPool, QRunnable, QObject, pyqtSlot
 from PyQt5.QtGui import QFont, QIcon
 
 # 导入核心模块
@@ -26,6 +27,33 @@ from core.annotation_engine import AnnotationEngine
 from .control_panel import ControlPanel
 from .plot_widget import TimeSeriesPlotWidget
 
+# 添加collections用于LRU缓存
+from collections import OrderedDict
+
+# 定义数据加载任务类
+class DataLoadTask(QRunnable):
+    """数据加载任务，用于线程池"""
+    
+    def __init__(self, file_path: str, skip_points: int = 0, callback=None):
+        super().__init__()
+        self.file_path = file_path
+        self.skip_points = skip_points
+        self.callback = callback
+        self.data_manager = DataManager()
+        self.data_manager.set_memory_mapping(True)  # 使用内存映射加载大文件
+    
+    def run(self):
+        """执行数据加载任务"""
+        try:
+            success = self.data_manager.load_file(self.file_path, self.skip_points)
+            if success and self.callback:
+                data = self.data_manager.get_data()
+                # 在主线程中执行回调
+                self.callback.call(data, self.file_path)
+        except Exception as e:
+            if self.callback:
+                self.callback.error(str(e), self.file_path)
+
 class DataLoadThread(QThread):
     """数据加载线程"""
     
@@ -37,6 +65,7 @@ class DataLoadThread(QThread):
         self.file_path = file_path
         self.skip_points = skip_points
         self.data_manager = DataManager()
+        self.data_manager.set_memory_mapping(True)  # 使用内存映射加载大文件
     
     def run(self):
         """运行数据加载"""
@@ -89,6 +118,14 @@ class MainWindow(QMainWindow):
         self.selected_mask_id = None  # 当前选中的遮罩ID
         self.mask_selection_enabled = True  # 选中模式开关
         print("[DEBUG] 遮罩选中机制已初始化")
+        
+        # 添加LRU缓存用于数据管理优化
+        self.data_cache = OrderedDict()
+        self.max_cache_size = 10  # 最大缓存10组数据
+        
+        # 添加线程池用于多线程优化
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(4)  # 限制最大线程数为4
         
         self.setup_ui()
         self.setup_connections()
@@ -664,8 +701,11 @@ class MainWindow(QMainWindow):
         
         print(f"=== 组切换开始: 从组 {getattr(self, 'current_group_index', -1)} 切换到组 {group_index} ===")
         if 0 <= group_index < len(self.current_groups):
-            # 保存当前组的标注状态
+            # 缓存当前组数据（在切换前）
             if self.current_group_index >= 0:
+                self.cache_current_group_data()
+                
+                # 保存当前组的标注状态
                 current_annotations = self.annotation_engine.get_annotations()
                 self.group_annotations[self.current_group_index] = current_annotations.copy()
                 print(f"保存组 {self.current_group_index} 的标注状态: {len(current_annotations)} 个标注")
@@ -674,6 +714,10 @@ class MainWindow(QMainWindow):
             old_index = getattr(self, 'current_group_index', -1)
             self.current_group_index = group_index
             print(f"当前组索引已更新: {old_index} -> {self.current_group_index}")
+            
+            # 重置全局遮罩ID计数器，确保新组从1开始编号
+            self.next_global_mask_id = 1
+            print(f"重置遮罩编号计数器为1")
             
             # 清空当前标注引擎
             self.annotation_engine.clear_annotations()
@@ -690,13 +734,22 @@ class MainWindow(QMainWindow):
             else:
                 print(f"组 {group_index} 是新组，开始新的标注表格")
             
-            # 创建绘图组件和加载文件
-            group = self.current_groups[group_index]
-            self.create_plot_widgets([group])
-            
-            # 加载第一个文件
-            if group['files']:
-                self.load_file(group['files'][0])
+            # 检查缓存中是否有数据
+            group_key = str(group_index)
+            if group_key in self.data_cache:
+                # 从缓存中获取数据
+                cached_data = self.data_cache.pop(group_key)  # 从缓存中移除并获取
+                self.data_cache[group_key] = cached_data  # 放到缓存末尾（LRU）
+                print(f"从缓存中加载组 {group_index} 的数据")
+                self.create_plot_widgets_with_data([self.current_groups[group_index]], cached_data)
+            else:
+                # 创建绘图组件和加载文件
+                group = self.current_groups[group_index]
+                self.create_plot_widgets([group])
+                
+                # 加载第一个文件
+                if group['files']:
+                    self.load_file(group['files'][0])
         print(f"=== 组切换完成: 当前组索引 = {getattr(self, 'current_group_index', -1)} ===")
     
     def on_file_changed(self, file_path: str):
@@ -719,17 +772,26 @@ class MainWindow(QMainWindow):
         # 数据加载时不跳过任何点
         skip_points = 0
         
-        # 创建加载线程
-        self.data_load_thread = DataLoadThread(file_path, skip_points)
-        self.data_load_thread.data_loaded.connect(self.on_data_loaded)
-        self.data_load_thread.error_occurred.connect(self.show_error_message)
+        # 使用线程池而不是单独的线程
+        load_task = DataLoadTask(file_path, skip_points, self)
+        self.thread_pool.start(load_task)
         
         # 显示加载状态
         self.show_status_message(f"加载文件: {os.path.basename(file_path)}")
         self.progress_bar.setVisible(True)
-        
-        # 启动线程
-        self.data_load_thread.start()
+    
+    # 添加回调方法用于处理线程池任务的结果
+    def call(self, data, file_path):
+        """处理数据加载完成的回调"""
+        if file_path == self.current_file_path:
+            self.on_data_loaded(data)
+            self.progress_bar.setVisible(False)
+    
+    def error(self, error_msg, file_path):
+        """处理数据加载错误的回调"""
+        if file_path == self.current_file_path:
+            self.show_error_message(f"加载文件时出错: {error_msg}")
+            self.progress_bar.setVisible(False)
     
     def on_data_loaded(self, data):
         """处理数据加载完成"""
@@ -1581,6 +1643,91 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     print(f"图表 {i+1} ({widget.file_name}) 同步标注失败: {str(e)}")
     
+    def create_plot_widgets_with_data(self, groups: List[Dict], cached_data: Dict):
+        """使用缓存数据创建绘图组件
+        
+        Args:
+            groups: 分组列表
+            cached_data: 缓存的数据
+        """
+        # 清除现有绘图组件
+        self.clear_plot_widgets()
+        
+        if not groups:
+            return
+        
+        # 获取当前组的文件
+        current_group = groups[0] if groups else None
+        if not current_group:
+            return
+        
+        files = current_group['files']
+        
+        # 为每个文件创建绘图组件
+        for i, file_path in enumerate(files):
+            file_name = os.path.basename(file_path)
+            print(f"\n=== 创建绘图组件 {i}: {file_name} ===")
+            plot_widget = TimeSeriesPlotWidget(file_name)
+            print(f"绘图组件创建完成，file_name: {plot_widget.file_name}")
+            
+            # 连接信号
+            plot_widget.range_selected.connect(self.on_range_selected)
+            plot_widget.range_confirmed.connect(self.on_range_confirmed)
+            plot_widget.mouse_moved.connect(self.on_mouse_moved)
+            plot_widget.plot_item.sigRangeChanged.connect(self.on_view_range_changed)
+            plot_widget.mask_dragged.connect(self.on_mask_dragged)
+            
+            # 从缓存中设置数据
+            if file_path in cached_data:
+                data = cached_data[file_path]
+                print(f"从缓存获取数据，长度: {len(data)}, 类型: {type(data)}")
+                plot_widget.set_data(data)
+                window_size = self.control_panel.window_size_spin.value()
+                plot_widget.set_window_parameters(window_size)
+                y_mode = 'global' if self.control_panel.y_mode_combo.currentText() == '全局' else 'window'
+                plot_widget.set_y_mode(y_mode)
+                print(f"为图表 {file_name} 从缓存加载数据成功，数据长度: {len(data)}")
+            
+            print(f"=== 绘图组件 {i} 创建完成 ===\n")
+            
+            self.plot_widgets.append(plot_widget)
+            self.plot_container.addWidget(plot_widget)
+            
+            # 设置第一个为主控
+            if i == 0:
+                self.master_plot = plot_widget
+        
+        # 设置分割器比例（平均分配）
+        if len(files) > 1:
+            sizes = [100] * len(files)
+            self.plot_container.setSizes(sizes)
+
+    def cache_current_group_data(self):
+        """缓存当前组的数据"""
+        if self.current_group_index < 0 or self.current_group_index >= len(self.current_groups):
+            return
+        
+        group_key = str(self.current_group_index)
+        group = self.current_groups[self.current_group_index]
+        
+        # 准备缓存数据
+        cached_data = {}
+        for i, plot_widget in enumerate(self.plot_widgets):
+            if i < len(group['files']) and hasattr(plot_widget, 'data') and plot_widget.data is not None:
+                file_path = group['files'][i]
+                cached_data[file_path] = plot_widget.data
+        
+        # 添加到缓存
+        self.data_cache[group_key] = cached_data
+        
+        # 维持LRU缓存大小
+        if len(self.data_cache) > self.max_cache_size:
+            # 移除最旧的项
+            oldest_key = next(iter(self.data_cache))
+            self.data_cache.pop(oldest_key)
+        
+        print(f"缓存组 {self.current_group_index} 的数据，当前缓存大小: {len(self.data_cache)}")
+
     def show_status_message(self, message: str, timeout: int = 0):
         """显示状态消息"""
         self.status_label.setText(message)

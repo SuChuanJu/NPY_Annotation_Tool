@@ -137,29 +137,42 @@ class TimeSeriesPlotWidget(QWidget):
     
     def __init__(self, file_name: str = "", parent=None):
         super().__init__(parent)
+        
         self.file_name = file_name
-        self.data = None
-        self.annotations = []
-        self.temp_annotation = None
+        self.data = None  # 存储完整数据
         
-        # 标注状态
-        self.is_annotating = False
-        self.annotation_start_x = None
+        # 窗口参数
+        self.window_size = 1000  # 默认窗口大小
+        self.window_start = 0    # 窗口起始位置（数据索引）
+        self.y_mode = 'window'   # Y轴模式 ('global' 或 'window')
         
-        # 显示参数
-        self.window_size = 1000
-        self.window_start = 0
-        self.y_mode = 'global'  # 'global' 或 'window'
+        # 初始化下采样参数
+        self.downsample_method = 'peak'  # 下采样方法
+        self.max_display_points = 2000   # 最大显示点数
+        self.downsample_enabled = True   # 是否启用下采样
         
-        # 清除选中状态的计时器
-        self.clear_selection_timer = QTimer()
-        self.clear_selection_timer.setSingleShot(True)
-        self.clear_selection_timer.timeout.connect(self.on_clear_selection_timeout)
-        self.hover_in_blank_area = False
+        # 可见性状态
+        self.visible = True  # 图表是否可见      
+        # 悬停状态跟踪
+        self.hover_in_blank_area = False  # 是否在空白区域悬停
+        self.clear_selection_timer = QTimer()  # 清除选中状态的计时器
+        # 注意：信号连接需要在确保对象完全初始化后进行
         
+        # 标注状态跟踪
+        self.is_annotating = False  # 是否正在进行标注
+        self.annotation_start_x = None  # 标注起始位置
+        
+        # 创建UI组件
         self.setup_ui()
+        
+        # 确保setup_plot被调用
         self.setup_plot()
-    
+        
+        # 连接计时器信号
+        self.clear_selection_timer.timeout.connect(self.on_clear_selection_timeout)
+        
+        print(f"时间序列绘图组件初始化完成: {self.file_name}")
+
     def setup_ui(self):
         """设置UI布局"""
         layout = QVBoxLayout(self)
@@ -291,6 +304,11 @@ class TimeSeriesPlotWidget(QWidget):
         if self.data is None or len(self.data) == 0:
             return
         
+        # 如果图表不可见，暂停渲染更新
+        if not self.visible:
+            print(f"图表 {self.file_name} 不可见，跳过渲染更新")
+            return
+        
         # 计算显示范围
         data_length = len(self.data)
         
@@ -327,6 +345,15 @@ class TimeSeriesPlotWidget(QWidget):
             min_len = min(len(x_data), len(window_data))
             x_data = x_data[:min_len]
             window_data = window_data[:min_len]
+        
+        # 应用下采样优化大数据渲染
+        if self.downsample_enabled and len(window_data) > self.max_display_points:
+            downsample_factor = max(1, len(window_data) // self.max_display_points)
+            if downsample_factor > 1:
+                # 使用pyqtgraph内置的下采样方法
+                x_data = x_data[::downsample_factor]
+                window_data = window_data[::downsample_factor]
+                print(f"应用下采样，采样因子: {downsample_factor}，新数据点数: {len(window_data)}")
         
         # 更新数据曲线
         print(f"准备更新数据曲线...")
@@ -1462,3 +1489,17 @@ class TimeSeriesPlotWidget(QWidget):
         
         print(f"[WARNING] 未找到遮罩{mask_id}")
         return False
+    
+    def set_visible(self, visible: bool):
+        """设置图表可见性
+        
+        Args:
+            visible: 是否可见
+        """
+        self.visible = visible
+        if not visible:
+            # 图表不可见时，清空数据以节省资源
+            self.data_curve.setData([], [])
+        else:
+            # 图表重新可见时，更新显示
+            self.update_plot()
