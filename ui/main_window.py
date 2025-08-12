@@ -1040,15 +1040,13 @@ class MainWindow(QMainWindow):
             # 添加标注
             annotation_id = self.annotation_engine.add_annotation(start, end)
             
-            # 同步遮罩到所有图表，并建立映射关系
-            global_mask_id = self.sync_annotation_to_all_plots(start, end)
+            # 清除所有图表上的遮罩
+            self.clear_all_plot_annotations()
             
-            # 建立全局遮罩ID与标注引擎ID的映射
-            if global_mask_id is not None:
-                self.global_to_annotation_mapping[global_mask_id] = annotation_id
-                print(f"[DEBUG] 建立映射关系: 全局遮罩ID {global_mask_id} -> 标注ID {annotation_id}")
+            # 重新同步所有标注到图表，确保编号正确
+            self.sync_all_annotations_to_plots()
             
-            # 更新控制面板显示（不重复添加遮罩到图表）
+            # 更新控制面板显示
             annotations = self.annotation_engine.get_annotations()
             self.control_panel.update_annotations(annotations)
             
@@ -1619,6 +1617,10 @@ class MainWindow(QMainWindow):
         # 清空现有映射
         self.global_mask_mapping.clear()
         self.global_to_annotation_mapping.clear()
+        
+        # 重置遮罩编号计数器，确保重新同步时从1开始编号
+        self.next_global_mask_id = 1
+        print(f"重置遮罩编号计数器为1（重新同步）")
         
         for annotation in annotations:
             start = annotation['start']

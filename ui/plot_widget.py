@@ -466,7 +466,8 @@ class TimeSeriesPlotWidget(QWidget):
         if event.button() == Qt.LeftButton:
             # 首先检查是否点击了遮罩（优先检查遮罩）
             clicked_mask = None
-            for item in self.annotation_items:
+            # 反向遍历以选中最后绘制的（最上层的）遮罩
+            for item in reversed(self.annotation_items):
                 if item.get('type') == 'mask':
                     region = item['region']
                     start, end = region.getRegion()
@@ -885,7 +886,8 @@ class TimeSeriesPlotWidget(QWidget):
         
         # 检查所有遮罩项
         if hasattr(self, 'annotation_items'):
-            for item in self.annotation_items:
+            # 反向遍历以优先检测最后绘制的（最上层的）遮罩
+            for item in reversed(self.annotation_items):
                 if item.get('type') == 'mask':
                     region = item['region']
                     start, end = region.getRegion()
@@ -1222,7 +1224,8 @@ class TimeSeriesPlotWidget(QWidget):
         print(f"[DEBUG] 检查点击位置 {x_pos}，遮罩数量: {len([item for item in self.annotation_items if item.get('type') == 'mask'])}")
         
         # 遍历所有遮罩项，检查点击位置
-        for item in self.annotation_items:
+        # 反向遍历以选中最后绘制的（最上层的）遮罩
+        for item in reversed(self.annotation_items):
             if item.get('type') == 'mask':
                 region = item['region']
                 start, end = region.getRegion()
@@ -1349,7 +1352,8 @@ class TimeSeriesPlotWidget(QWidget):
         
         # 检查是否悬停在任何遮罩上
         hovered_mask_id = None
-        for item in self.annotation_items:
+        # 反向遍历以选中最后绘制的（最上层的）遮罩
+        for item in reversed(self.annotation_items):
             if item.get('type') == 'mask':
                 region = item['region']
                 start, end = region.getRegion()
